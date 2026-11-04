@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCI Labels</title>
+<style>
+@page { size: A4 portrait; margin: 8mm 8mm 6mm 8mm; }
+:root { --lw: 36mm; --lh: 18mm; --gap: 2mm; --qr: 14mm; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: #e9ebee; color: #111; }
+.toolbar { background: #fff; padding: 14px 18px; display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; border-bottom: 1px solid #ddd; }
+.toolbar label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; font-weight: 700; }
+.toolbar input { font-size: 18px; padding: 8px; width: 120px; }
+.toolbar button { font-size: 17px; padding: 10px 18px; font-weight: 700; cursor: pointer; }
+.help { font-size: 13px; color: #444; max-width: 560px; line-height: 1.4; }
+.page { width: 194mm; height: 283mm; margin: 8mm auto; background: #fff; overflow: hidden; break-after: page; page-break-after: always; }
+.page:last-child { break-after: auto; page-break-after: auto; }
+.hdr { height: 8mm; display: flex; align-items: center; justify-content: space-between; gap: 4mm; font-size: 9pt; color: #333; }
+.hdr .sp { flex: 1; }
+.ruler { display: flex; align-items: flex-start; width: 50mm; height: 4mm; border: 0.3mm solid #333; border-top: 0; }
+.ruler i { flex: 1; border-right: 0.3mm solid #333; height: 55%; }
+.ruler i:nth-child(5n) { height: 100%; }
+.ruler i:last-child { border-right: 0; }
+.grid { display: grid; grid-template-columns: repeat(5, var(--lw)); grid-auto-rows: var(--lh); gap: var(--gap); }
+.lab { width: var(--lw); height: var(--lh); border: 0.2mm dashed #b5b5b5; display: flex; align-items: center; overflow: hidden; background: #fff; padding-left: 2mm; }
+.lab svg { width: var(--qr); height: var(--qr); flex: none; shape-rendering: crispEdges; display: block; }
+.lab .txt { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; }
+.lab .num { font-size: 20pt; font-weight: 900; letter-spacing: 0.2mm; font-variant-numeric: tabular-nums; }
+.lab .cci { font-size: 6.5pt; font-weight: 700; color: #333; margin-top: 1.2mm; letter-spacing: 0.6mm; }
+@media print {
+  body { background: #fff; }
+  .toolbar { display: none; }
+  .page { margin: 0; width: auto; height: auto; }
+}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <label>Start number <input id="start" type="number" min="1" max="9999" value="1"></label>
+  <label>Count <input id="count" type="number" min="1" max="2000" value="65"></label>
+  <button id="make" type="button">Make labels</button>
+  <button id="print" type="button">Print…</button>
+  <div class="help"><b>Labels 36 × 18 mm, 65 per A4 page (5 × 13).</b> Print on A4 portrait at <b>100 % scale</b> (no “fit to page”) and check the 50 mm ruler with a real ruler. Laminate, cut on the dashed lines, tape around the equipment. Print each number range only once – the next batch starts after the last number used.</div>
+</div>
+<div id="out"></div>
+<script src="./lib/qrcode.js"></script>
+<script>
+(function () {
+  var PREFIX = 'CCI:', PER_PAGE = 65, DIGITS = 4;
+  function pad(n) { var s = String(n); while (s.length < DIGITS) s = '0' + s; return s; }
+  function qrSvg(text) {
+    var qr = qrcode(0, 'H');
+    try { qr.addData(text, 'Alphanumeric'); qr.make(); }
+    catch (e) { qr = qrcode(0, 'H'); qr.addData(text); qr.make(); }
+    var n = qr.getModuleCount(), d = '';
+    for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (qr.isDark(r, c)) d += 'M' + c + ' ' + r + 'h1v1h-1z';
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + n + ' ' + n + '"><rect width="' + n + '" height="' + n + '" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+  }
+  function build() {
+    var start = Math.min(9999, Math.max(1, parseInt(document.getElementById('start').value, 10) || 1));
+    var count = Math.min(2000, Math.max(1, parseInt(document.getElementById('count').value, 10) || 1));
+    var html = '', i = 0;
+    while (i < count) {
+      var n = Math.min(PER_PAGE, count - i), first = start + i, last = first + n - 1;
+      html += '<div class="page"><div class="hdr"><span>CCI labels ' + pad(first) + ' – ' + pad(last) + '</span><span class="sp"></span><span>50 mm check:</span><div class="ruler"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div class="grid">';
+      for (var k = 0; k < n; k++) {
+        var id = pad(first + k);
+        html += '<div class="lab">' + qrSvg(PREFIX + id) + '<div class="txt"><div class="num">' + id + '</div><div class="cci">CCI</div></div></div>';
+      }
+      html += '</div></div>';
+      i += n;
+    }
+    document.getElementById('out').innerHTML = html;
+    document.title = 'CCI labels ' + pad(start) + '-' + pad(start + count - 1);
+    try { history.replaceState(null, '', '?start=' + start + '&count=' + count); } catch (e) {}
+  }
+  var p = new URLSearchParams(location.search);
+  if (p.get('start')) document.getElementById('start').value = p.get('start');
+  if (p.get('count')) document.getElementById('count').value = p.get('count');
+  document.getElementById('make').onclick = build;
+  document.getElementById('print').onclick = function () { window.print(); };
+  build();
+})();
+</script>
+</body>
+</html>

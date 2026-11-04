@@ -1,0 +1,309 @@
+/* End-to-end test of the app in headless Chromium (Pixel 5 emulation).
+   Run: node test/e2e.cjs   (needs the preinstalled playwright + python3 with openpyxl & Pillow)
+   Output (screenshots, exported files) goes to test-output/. Exit code 1 on any failure. */
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { chromium, devices } = require('playwright');
+const { serve } = require('./serve.cjs');
+
+const ROOT = path.resolve(__dirname, '..');
+const OUT = path.join(ROOT, 'test-output');
+const DEFAULT_TYPES = ['Harness', 'Ladder', 'Cable Reel', 'Light', 'Power Tool', 'Welding Machine', 'Chain Block', 'Lifeline', 'Anchorage Beam'];
+let failures = 0, checks = 0;
+function check(cond, msg) { checks++; if (cond) console.log('  ok   ' + msg); else { failures++; console.log('  FAIL ' + msg); } }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function main() {
+  fs.rmSync(OUT, { recursive: true, force: true });
+  fs.mkdirSync(OUT, { recursive: true });
+  const { server, base } = await serve(ROOT);
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext({ ...devices['Pixel 5'], acceptDownloads: true });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+  page.on('dialog', d => d.accept(d.type() === 'prompt' ? 'DELETE' : undefined));
+
+  const app = (today, hash) => base + 'index.html' + (today ? '?today=' + today : '') + (hash || '');
+  const text = async sel => ((await page.textContent(sel)) || '').replace(/\s+/g, ' ').trim();
+  const shot = name => page.screenshot({ path: path.join(OUT, name + '.png') });
+  const state = () => page.evaluate(() => JSON.parse(JSON.stringify(window.CCI.state())));
+  const waitStatus = s => page.waitForFunction(x => { const e = document.querySelector('.result .status'); return !!e && e.textContent === x; }, s, { timeout: 10000 });
+  async function manualEntry(id) {
+    await page.waitForSelector('#manual-btn');
+    await page.click('#manual-btn');
+    await page.fill('#manual-id', id);
+    await page.click('#manual button[type=submit]');
+  }
+  async function registerVia(id, type, team, detail) {
+    await page.goto(app('2026-11-04', '#scan'));
+    await manualEntry(id);
+    await waitStatus('NOT REGISTERED');
+    await page.click('a[href^="#register/"]');
+    await page.waitForSelector('.pick');
+    if (type) await page.click('.pick[data-pick=type] button[data-v="' + type + '"]');
+    if (detail && detail.type) await page.fill('#type-detail', detail.type);
+    if (team) await page.click('.pick[data-pick=team] button[data-v="' + team + '"]');
+    if (detail && detail.team) await page.fill('#team-detail', detail.team);
+    await page.click('#save');
+    await waitStatus('NOT INSPECTED');
+  }
+  async function inspect(result) {
+    await page.click('#inspect-btn');
+    await page.waitForSelector('#pass');
+    await page.click(result === 'Pass' ? '#pass' : '#fail');
+    await page.waitForSelector('.result .flash');
+  }
+
+  console.log('1. Home (empty)');
+  await page.goto(app('2026-11-04'));
+  await page.waitForSelector('a[href="#scan"].huge');
+  let banner = await text('.banner');
+  check(banner.includes('2026 Q4') && banner.includes('GREEN'), 'banner shows 2026 Q4 GREEN');
+  check((await text('.progress')).includes('0 / 0 inspected'), 'progress is empty');
+  check((await text('#dev-banner')).includes('2026-11-04'), 'test date banner visible');
+  await shot('01-home-empty');
+
+  console.log('2. Register 0001 and inspect PASS');
+  await registerVia('1', 'Welding Machine', 'Welder');
+  check((await text('.result .id')) === '0001', 'manual entry "1" normalised to 0001');
+  check((await text('.result .flash')).includes('Registered'), 'flash after register');
+  await shot('02-result-not-inspected');
+  await inspect('Pass');
+  check((await text('.result .status')) === 'VALID' && (await text('.result .sub')).includes('2026 Q4 GREEN'), '0001 VALID 2026 Q4 GREEN after PASS');
+  check((await text('.result .flash')).includes('GREEN tape'), 'flash says apply GREEN tape');
+  await shot('03-result-valid');
+
+  console.log('3. Register 0002 (defaults preselected), FAIL, then re-inspect PASS');
+  await page.goto(app('2026-11-04', '#scan'));
+  await manualEntry('0002');
+  await waitStatus('NOT REGISTERED');
+  await page.click('a[href^="#register/"]');
+  await page.waitForSelector('.pick');
+  check(!!(await page.$('.pick[data-pick=type] button.on[data-v="Welding Machine"]')), 'last type preselected');
+  check(!!(await page.$('.pick[data-pick=team] button.on[data-v="Welder"]')), 'last team preselected');
+  await page.click('.pick[data-pick=type] button[data-v="Harness"]');
+  await page.click('.pick[data-pick=team] button[data-v="Boiler"]');
+  await shot('04-register');
+  await page.click('#save');
+  await waitStatus('NOT INSPECTED');
+  await page.click('#inspect-btn');
+  await page.waitForSelector('#fail');
+  await shot('05-inspect');
+  await page.click('#fail');
+  await page.waitForSelector('.result .flash');
+  check((await text('.result .status')) === 'REJECTED', '0002 REJECTED after FAIL');
+  check((await text('.result .flash')).includes('quarantine'), 'flash says quarantine');
+  await shot('06-result-rejected');
+  await inspect('Pass');
+  check((await text('.result .status')) === 'VALID', '0002 VALID after re-inspect PASS (confirm accepted)');
+  let st = await state();
+  check(st.inspections.filter(r => r.itemId === '0002').length === 2, 'both records kept for 0002');
+
+  console.log('4. Other type/team with detail, retire');
+  await registerVia('0003', 'Other', 'Other', { type: 'Jack hammer', team: 'Civil' });
+  let info = await text('.result .info');
+  check(info.includes('Other (Jack hammer)') && info.includes('Other (Civil)'), 'Other with detail shown');
+  await registerVia('0004', 'Ladder', 'STG');
+  await page.click('a[href^="#item/"]');
+  await page.waitForSelector('#retire');
+  await page.click('#retire');
+  await page.waitForSelector('#reactivate');
+  check((await text('.banner')).includes('RETIRED'), '0004 retired in detail view');
+  await page.goto(app('2026-11-04', '#result/0004'));
+  await waitStatus('RETIRED');
+  check(!(await page.$('#inspect-btn')), 'no INSPECT button for retired item');
+  await shot('06b-result-retired');
+
+  console.log('5. Items list');
+  await page.goto(app('2026-11-04', '#items'));
+  await page.waitForSelector('#list .item');
+  let chips = await text('#chips');
+  check(/All 4/.test(chips) && /Not inspected 1/.test(chips) && /Valid 2/.test(chips) && /Rejected 0/.test(chips) && /Retired 1/.test(chips), 'chip counts: ' + chips);
+  await page.click('.chip[data-s=TODO]');
+  check((await page.$$('#list .item')).length === 1 && (await text('#list .item .iid')) === '0003', 'Not inspected filter shows 0003');
+  await page.click('.chip[data-s=ALL]');
+  await page.fill('#q', '2');
+  check((await page.$$('#list .item')).length === 1, 'search "2" finds only 0002');
+  await page.fill('#q', '');
+  await page.selectOption('#team', 'Boiler');
+  check((await page.$$('#list .item')).length === 1, 'team filter works');
+  await page.selectOption('#team', 'ALL');
+  await shot('07-items');
+  await page.goto(app('2026-11-04'));
+  await page.waitForSelector('a[href="#scan"].huge');
+  check((await text('.progress')).includes('2 / 3 inspected') && (await text('.progress')).includes('1 not inspected'), 'home progress 2 / 3');
+  await shot('01b-home');
+
+  console.log('6. Replace label 0001 → 0100');
+  await page.goto(app('2026-11-04', '#scan/replace/0001'));
+  await manualEntry('0002');
+  await sleep(300);
+  check((await text('#toast')).includes('already registered'), 'cannot move onto a registered label');
+  await manualEntry('0100');
+  await page.waitForSelector('.result .flash');
+  check((await text('.result .id')) === '0100' && (await text('.result .status')) === 'VALID', '0100 is VALID after replace');
+  await page.goto(app('2026-11-04', '#result/0001'));
+  await waitStatus('LABEL REPLACED');
+  check((await text('.result')).includes('0100'), 'old label shows LABEL REPLACED → 0100');
+  await shot('08-label-replaced');
+  await page.goto(app('2026-11-04', '#item/0100'));
+  await page.waitForSelector('.kv');
+  check((await text('.kv')).includes('0001'), 'previous label listed in details');
+  await shot('08b-item-detail');
+  st = await state();
+  check(!st.items['0001'] && !!st.items['0100'] && st.inspections.every(r => r.itemId !== '0001') && st.replaced['0001'].newId === '0100', 'state moved to 0100');
+  await page.goto(app('2026-11-04', '#register/0001'));
+  await waitStatus('LABEL REPLACED');
+  check(true, 'registering an old replaced number is refused');
+
+  console.log('7. Quarter change: grace, then not inspected');
+  await page.goto(app('2027-01-10', '#result/0100'));
+  await waitStatus('VALID (GRACE)');
+  check((await text('.result')).includes('Inspect before 14-Jan'), 'grace on 10-Jan with deadline 14-Jan');
+  await shot('09-result-grace');
+  await page.goto(app('2027-01-10'));
+  await page.waitForSelector('a[href="#scan"].huge');
+  banner = await text('.banner');
+  check(banner.includes('2027 Q1') && banner.includes('YELLOW'), 'Q1 YELLOW banner');
+  check((await text('.progress')).includes('0 / 3 inspected') && (await text('.progress')).includes('2 in grace'), 'progress in Q1: ' + (await text('.progress')));
+  await page.goto(app('2027-01-15', '#result/0100'));
+  await waitStatus('NOT INSPECTED');
+  check(true, 'not inspected on 15-Jan (grace over)');
+  await page.goto(app('2027-01-14', '#result/0100'));
+  await waitStatus('VALID (GRACE)');
+  await inspect('Pass');
+  check((await text('.result .sub')).includes('2027 Q1 YELLOW'), 'VALID 2027 Q1 YELLOW after Q1 inspection');
+  await shot('09b-result-valid-q1');
+
+  console.log('8. Export report (+backup) and master list, verify with openpyxl');
+  await page.goto(app('2026-11-04', '#export'));
+  await page.waitForSelector('#report');
+  await shot('10-export');
+  const dl1 = page.waitForEvent('download');
+  await page.click('#report');
+  const d1 = await dl1;
+  const d2 = await page.waitForEvent('download');
+  const p1 = path.join(OUT, d1.suggestedFilename()); await d1.saveAs(p1);
+  const p2 = path.join(OUT, d2.suggestedFilename()); await d2.saveAs(p2);
+  check(d1.suggestedFilename() === 'CCI_Inspection_2026-Q4_20261104.xlsx', 'report filename: ' + d1.suggestedFilename());
+  check(d2.suggestedFilename() === 'CCI_Backup_20261104.json', 'backup filename: ' + d2.suggestedFilename());
+  const dl3 = page.waitForEvent('download');
+  await page.click('#master');
+  const d3 = await dl3;
+  const p3 = path.join(OUT, d3.suggestedFilename()); await d3.saveAs(p3);
+  check(d3.suggestedFilename() === 'CCI_MasterList_20261104.xlsx', 'master filename: ' + d3.suggestedFilename());
+  const v = JSON.parse(execFileSync('python3', ['-I', path.join(__dirname, 'verify_xlsx.py'), p1, p3], { encoding: 'utf8' }));
+  check(v.sheets.join('|') === 'Summary|2026-Q4 Status|History', 'report sheets: ' + v.sheets.join(', '));
+  check(v.summary_tables === 2, 'summary has type and team tables');
+  check(v.total.join(',') === 'TOTAL,3,2,2,0,1,67', 'summary TOTAL row: ' + v.total.join(','));
+  check(v.status_rows === 3 && v.status_results.join(',') === 'Not inspected,Pass,Pass', 'status sheet: ' + v.status_ids.join(',') + ' / ' + v.status_results.join(','));
+  check(v.history_rows === 4 && v.history_superseded === 1, 'history rows ' + v.history_rows + ', superseded ' + v.history_superseded);
+  check(v.master_rows === 4 && v.master_ids.join(',') === '0002,0003,0004,0100', 'master list ids: ' + v.master_ids.join(','));
+  const bk = JSON.parse(fs.readFileSync(p2, 'utf8'));
+  check(bk.app === 'CCI' && Object.keys(bk.state.items).length === 4, 'backup json has 4 items');
+
+  console.log('9. Delete all data, then restore from backup');
+  const before = await state();
+  await page.goto(app('2026-11-04', '#settings'));
+  await page.waitForSelector('#wipe');
+  await shot('11-settings');
+  await page.click('#wipe');
+  await page.waitForFunction(() => Object.keys(window.CCI.state().items).length === 0);
+  await page.goto(app('2026-11-04'));
+  await page.waitForSelector('a[href="#scan"].huge');
+  check((await text('.progress')).includes('0 / 0 inspected'), 'wiped: 0 / 0');
+  await page.goto(app('2026-11-04', '#export'));
+  await page.waitForSelector('#restore');
+  await page.setInputFiles('#restore', p2);
+  await page.waitForSelector('a[href="#scan"].huge');
+  const after = await state();
+  check(JSON.stringify(after.items) === JSON.stringify(before.items) && JSON.stringify(after.inspections) === JSON.stringify(before.inspections) && JSON.stringify(after.replaced) === JSON.stringify(before.replaced), 'restored data equals backup');
+  await page.reload();
+  await page.waitForSelector('a[href="#scan"].huge');
+  check((await text('.progress')).includes('2 / 3 inspected'), 'data survives reload');
+
+  console.log('10. Settings save and grace days');
+  await page.goto(app('2026-11-04', '#settings'));
+  await page.waitForSelector('#sform');
+  await page.fill('#inspector', 'Rakoto');
+  await page.fill('#grace', '30');
+  await page.fill('#types', 'Harness\nLadder\nOther\nGrinder');
+  await page.click('#sform button[type=submit]');
+  await page.waitForSelector('a[href="#scan"].huge');
+  st = await state();
+  check(st.settings.inspector === 'Rakoto' && st.settings.graceDays === 30 && st.settings.types.join(',') === 'Harness,Ladder,Grinder', 'settings saved (Other filtered out): ' + st.settings.types.join(','));
+  await page.goto(app('2027-01-20', '#result/0002'));
+  await waitStatus('VALID (GRACE)');
+  check((await text('.result')).includes('Inspect before 30-Jan'), 'grace of 30 days respected');
+  await page.goto(app('2026-11-04', '#settings'));
+  await page.waitForSelector('#sform');
+  await page.fill('#inspector', 'Jackis');
+  await page.fill('#grace', '14');
+  await page.fill('#types', DEFAULT_TYPES.join('\n'));
+  await page.click('#sform button[type=submit]');
+  await page.waitForSelector('a[href="#scan"].huge');
+
+  console.log('11. Service worker: offline reload');
+  await page.goto(app(''));
+  await page.waitForSelector('a[href="#scan"].huge');
+  await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 20000 });
+  await ctx.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('a[href="#scan"].huge', { timeout: 15000 });
+  check(true, 'app loads offline from the service worker cache');
+  await page.goto(app('2026-11-04', '#items'));
+  await page.waitForSelector('#list .item');
+  check((await page.$$('#list .item')).length === 4, 'items available offline');
+  await ctx.setOffline(false);
+
+  console.log('12. Labels print page');
+  const dctx = await browser.newContext({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 3 });
+  const dpage = await dctx.newPage();
+  dpage.on('pageerror', e => errors.push('labels pageerror: ' + e.message));
+  await dpage.goto(base + 'labels.html?start=1&count=65');
+  await dpage.waitForSelector('.lab');
+  check((await dpage.$$('.lab')).length === 65 && (await dpage.$$('.page')).length === 1, '65 labels on one page');
+  check((await dpage.textContent('.lab .num')) === '0001', 'first label is 0001');
+  check((await dpage.getAttribute('.lab svg', 'viewBox')) === '0 0 21 21', 'QR is the smallest version (21 modules)');
+  await dpage.goto(base + 'labels.html?start=1&count=500');
+  await dpage.waitForFunction(() => document.querySelectorAll('.lab').length === 500);
+  check((await dpage.$$('.page')).length === 8, '500 labels on 8 pages');
+  await dpage.emulateMedia({ media: 'print' });
+  await dpage.screenshot({ path: path.join(OUT, '12-labels-print.png') });
+  await dpage.emulateMedia({ media: 'screen' });
+  await dpage.goto(base + 'labels.html?start=7&count=1');
+  await dpage.waitForSelector('.lab');
+  const labPng = path.join(OUT, 'label-0007.png');
+  await (await dpage.$('.lab')).screenshot({ path: labPng });
+  await dctx.close();
+
+  console.log('13. Camera scan through the real scanner (fake camera feed showing label 0007)');
+  const y4m = path.join(OUT, 'label-0007.y4m');
+  execFileSync('python3', ['-I', path.join(__dirname, 'make_y4m.py'), labPng, y4m]);
+  const cbrowser = await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--use-file-for-fake-video-capture=' + y4m] });
+  const cctx = await cbrowser.newContext({ ...devices['Pixel 5'], permissions: ['camera'] });
+  const cpage = await cctx.newPage();
+  cpage.on('pageerror', e => errors.push('camera pageerror: ' + e.message));
+  await cpage.goto(app('2026-11-04', '#scan'));
+  await cpage.waitForSelector('#video');
+  await cpage.screenshot({ path: path.join(OUT, '13-scan.png') });
+  let scanned = false;
+  try { await cpage.waitForURL(/#result\/0007$/, { timeout: 20000 }); scanned = true; } catch (e) { scanned = false; }
+  check(scanned, 'QR label decoded by the scanner → #result/0007');
+  if (scanned) {
+    await cpage.waitForFunction(() => { const e = document.querySelector('.result .status'); return !!e && e.textContent === 'NOT REGISTERED'; });
+    check(true, 'scanned new label shows NOT REGISTERED');
+  }
+  await cbrowser.close();
+
+  await browser.close();
+  server.close();
+  check(errors.length === 0, 'no page errors' + (errors.length ? ': ' + errors.join(' | ') : ''));
+  console.log('\n' + (failures ? 'FAILED ' + failures + ' of ' + checks + ' checks' : 'PASSED all ' + checks + ' checks'));
+  process.exit(failures ? 1 : 0);
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
