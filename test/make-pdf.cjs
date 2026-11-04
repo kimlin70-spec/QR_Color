@@ -13,8 +13,8 @@ const { serve } = require('./serve.cjs');
   const page = await browser.newPage();
   await page.goto(base + 'labels.html?start=' + start + '&count=' + count);
   await page.waitForFunction(n => document.querySelectorAll('.lab').length === n, count);
-  // Margins are given explicitly here; CSS @page margins are zeroed so they are not applied twice.
-  await page.addStyleTag({ content: '@page { margin: 0 }' });
+  // The CSS @page rule in labels.html sets the A4 size and the 8/8/6/8 mm margins; the same values are
+  // passed here as the fallback for Chromium's PDF printer.
   const out = path.join(ROOT, 'labels_' + pad(start) + '-' + pad(start + count - 1) + '.pdf');
   await page.pdf({ path: out, format: 'A4', printBackground: true, margin: { top: '8mm', right: '8mm', bottom: '6mm', left: '8mm' } });
   console.log('Wrote ' + out);
