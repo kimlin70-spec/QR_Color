@@ -1,0 +1,14 @@
+{
+  "name": "qr-color-cci",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Color Code Inspection - offline PWA for quarterly colour-coded equipment inspection",
+  "scripts": {
+    "serve": "node test/serve.cjs",
+    "test": "node test/e2e.cjs",
+    "labels:pdf": "node test/make-pdf.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}
