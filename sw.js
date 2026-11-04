@@ -1,6 +1,6 @@
 /* Color Code Inspection – service worker (offline cache).
    Bump VERSION on every release so phones pick up the new files. */
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CACHE = 'cci-' + VERSION;
 const ASSETS = [
   './',

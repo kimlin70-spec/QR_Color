@@ -1,6 +1,6 @@
 {
   "name": "qr-color-cci",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Color Code Inspection - offline PWA for quarterly colour-coded equipment inspection",
   "scripts": {

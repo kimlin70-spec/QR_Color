@@ -24,6 +24,7 @@
 
 - **Inspector name**: 점검자 이름. 기본값 `Jackis`. 모든 점검 기록에 이 이름이 붙습니다.
 - **Grace days**: 분기가 바뀐 뒤 직전 분기 색을 인정하는 일수. 기본 14일.
+- **Early start days**: 다음 분기 점검을 분기 시작 며칠 전부터 열지. 기본 7일, 0이면 끄기.
 - **Quarter colours**: Q1 YELLOW, Q2 BROWN, Q3 BLUE, Q4 GREEN (이름과 색 변경 가능).
 - **Equipment types / Teams**: 한 줄에 하나. `Other`는 항상 제공되며 고르면 글자를 적을 수 있습니다.
 
@@ -71,6 +72,8 @@ QR이 안 읽히면 **Enter number manually** 로 라벨의 번호를 입력합�
 
 분기는 달력 기준입니다 (Q1 1~3월, Q2 4~6월, Q3 7~9월, Q4 10~12월).
 
+**조기 시작 (Early start)**: 분기 시작 7일 전부터(기본값) 다음 분기 점검이 열립니다. 예를 들어 12월 25일~31일에 한 점검은 `2027-Q1` YELLOW 기록으로 저장되고, 그때 감는 테이프도 YELLOW입니다. 이 기간에는 Home에 "Q1 YELLOW inspection is open" 안내가 뜨고 진행률도 다음 분기 기준으로 셉니다. 아직 4분기 합격 상태인 장비를 스캔하면 `VALID 2026 Q4 GREEN`으로 뜨되 "Q1 inspection is open – inspect now" 안내가 붙고, Items의 Not inspected 목록에 남습니다.
+
 ## 5. 라벨 교체 · 퇴역 · 수정
 
 - **라벨이 헐겁거나 오염되면 미리 교체**: 옛 라벨을 떼기 전에 스캔 → 판정 화면의 **Replace label** → 새 깡통 라벨 스캔 → 확인. 점검 이력이 새 번호로 따라가고, 옛 번호를 스캔하면 `LABEL REPLACED` 가 뜹니다. 옛 라벨은 찢어 버립니다.
@@ -113,7 +116,7 @@ test/                            Playwright e2e 테스트, PDF 생성 스크립�
 ```
 
 - 로컬 실행: `node test/serve.cjs` → `http://127.0.0.1:8080/`
-- 테스트: `node test/e2e.cjs` (Playwright + Chromium, python3 + openpyxl + Pillow 필요). 등록·점검·판정·분기 전환·라벨 교체·Export·백업/복원·오프라인·실제 QR 디코딩까지 56개 항목을 검사하고 `test-output/` 에 화면 캡처와 파일을 남깁니다.
+- 테스트: `node test/e2e.cjs` (Playwright + Chromium, python3 + openpyxl + Pillow 필요). 등록·점검·판정·분기 전환·라벨 교체·Export·백업/복원·오프라인·실제 QR 디코딩까지 67개 항목을 검사하고 `test-output/` 에 화면 캡처와 파일을 남깁니다.
 - 라벨 PDF 재생성: `node test/make-pdf.cjs 1 500`
 - **테스트용 날짜**: 주소 뒤에 `?today=2027-01-10` 을 붙이면 그 날짜로 분기·판정을 계산합니다 (화면 아래 주황 띠로 표시). 운영 중에는 쓰지 않습니다.
 - 데이터는 IndexedDB(`cci-db`)에 JSON 문서 하나로 저장됩니다. 백업 파일이 곧 그 구조입니다.

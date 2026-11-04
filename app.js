@@ -3,7 +3,7 @@
 (function () {
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const QR_PREFIX = 'CCI:';
 const ID_DIGITS = 4;
 const DB_NAME = 'cci-db';
@@ -66,6 +66,17 @@ function quarterInfo(d) {
   return { year: y, q, key: y + '-Q' + q, start: new Date(y, (q - 1) * 3, 1), end: new Date(y, q * 3, 0, 23, 59, 59, 999) };
 }
 function prevQuarterInfo(qi) { return quarterInfo(new Date(qi.year, (qi.q - 1) * 3 - 1, 1)); }
+function nextQuarterInfo(qi) { return quarterInfo(new Date(qi.year, qi.q * 3, 1)); }
+/* Early start: the next quarter's inspection opens `earlyDays` days before that quarter begins.
+   Inside that window new inspections are recorded under the next quarter (and its colour). */
+function earlyWindow(d) {
+  const ed = S.settings.earlyDays | 0;
+  if (ed <= 0) return null;
+  const nq = nextQuarterInfo(quarterInfo(d));
+  const days = Math.round((nq.start - startOfDay(d)) / 864e5);
+  return days >= 1 && days <= ed ? nq : null;
+}
+function campaignQuarter(d) { return earlyWindow(d) || quarterInfo(d); }
 function parseQuarterKey(key) {
   const m = /^(\d{4})-Q([1-4])$/.exec(String(key));
   return m ? quarterInfo(new Date(+m[1], (+m[2] - 1) * 3, 1)) : null;
@@ -90,6 +101,7 @@ function defaultSettings() {
       Q4: { name: 'GREEN', hex: '#14A44D' }
     },
     graceDays: 14,
+    earlyDays: 7,
     types: DEFAULT_TYPES.slice(),
     teams: DEFAULT_TEAMS.slice(),
     inspector: 'Jackis',
@@ -106,6 +118,7 @@ function migrate(st) {
   out.settings.quarterColors = Object.assign(defaultSettings().quarterColors, out.settings.quarterColors || {});
   if (!Array.isArray(out.settings.types) || !out.settings.types.length) out.settings.types = DEFAULT_TYPES.slice();
   if (!Array.isArray(out.settings.teams) || !out.settings.teams.length) out.settings.teams = DEFAULT_TEAMS.slice();
+  if (!Number.isInteger(out.settings.earlyDays)) out.settings.earlyDays = 7;
   if (!out.items || typeof out.items !== 'object' || Array.isArray(out.items)) out.items = {};
   if (!Array.isArray(out.inspections)) out.inspections = [];
   if (!out.replaced || typeof out.replaced !== 'object') out.replaced = {};
@@ -175,30 +188,42 @@ function isSuperseded(r) { const l = latestIn(r.itemId, r.quarter); return !!l &
 function typeLabel(it) { return it.type === OTHER && it.typeDetail ? OTHER + ' (' + it.typeDetail + ')' : it.type; }
 function teamLabel(it) { return it.team === OTHER && it.teamDetail ? OTHER + ' (' + it.teamDetail + ')' : it.team; }
 
-/* Judgement for one item at date d (spec section 3). */
+/* Judgement for one item at date d (spec section 3, plus the early-start window). */
 function evaluate(item, d) {
   d = d || now();
   const qi = quarterInfo(d);
+  const nq = earlyWindow(d);   // next quarter, when its inspection has already opened
+  const cq = nq || qi;         // quarter that new inspections are recorded under
   if (item.status === 'Retired') {
-    return { code: 'RETIRED', title: 'RETIRED', sub: 'REMOVE FROM SERVICE', bg: '#111111', fg: '#fff', instr: 'Do not use. Remove from service.' };
+    return { code: 'RETIRED', title: 'RETIRED', sub: 'REMOVE FROM SERVICE', bg: '#111111', fg: '#fff', instr: 'Do not use. Remove from service.', todo: false };
+  }
+  const crec = latestIn(item.id, cq.key);
+  const todo = !crec;
+  if (nq && crec) {
+    if (crec.result === 'Fail') {
+      return { code: 'REJECTED', title: 'REJECTED', sub: 'QUARANTINE', bg: '#d32f2f', fg: '#fff', record: crec, instr: 'Tag out. Repair, then re-inspect.', todo };
+    }
+    const c = quarterColor(nq.q);
+    return { code: 'VALID', title: 'VALID', sub: nq.year + ' Q' + nq.q + ' ' + c.name, bg: c.hex, fg: textOn(c.hex), record: crec, color: c, instr: 'Tape colour: ' + c.name, todo };
   }
   const cur = latestIn(item.id, qi.key);
   if (cur && cur.result === 'Fail') {
-    return { code: 'REJECTED', title: 'REJECTED', sub: 'QUARANTINE', bg: '#d32f2f', fg: '#fff', record: cur, instr: 'Tag out. Repair, then re-inspect.' };
+    return { code: 'REJECTED', title: 'REJECTED', sub: 'QUARANTINE', bg: '#d32f2f', fg: '#fff', record: cur, instr: 'Tag out. Repair, then re-inspect.', todo };
   }
   if (cur) {
     const c = quarterColor(qi.q);
-    return { code: 'VALID', title: 'VALID', sub: qi.year + ' Q' + qi.q + ' ' + c.name, bg: c.hex, fg: textOn(c.hex), record: cur, color: c, instr: 'Tape colour: ' + c.name };
+    const instr = nq ? nq.year + ' Q' + nq.q + ' ' + quarterColor(nq.q).name + ' inspection is open – inspect now' : 'Tape colour: ' + c.name;
+    return { code: 'VALID', title: 'VALID', sub: qi.year + ' Q' + qi.q + ' ' + c.name, bg: c.hex, fg: textOn(c.hex), record: cur, color: c, instr, todo };
   }
   if (inGrace(qi, d)) {
     const pq = prevQuarterInfo(qi);
     const prev = latestIn(item.id, pq.key);
     if (prev && prev.result === 'Pass') {
       const c = quarterColor(pq.q), until = graceDeadline(qi);
-      return { code: 'GRACE', title: 'VALID (GRACE)', sub: pq.year + ' Q' + pq.q + ' ' + c.name, bg: c.hex, fg: textOn(c.hex), record: prev, color: c, until, instr: 'Inspect before ' + fmtDate(until, false) };
+      return { code: 'GRACE', title: 'VALID (GRACE)', sub: pq.year + ' Q' + pq.q + ' ' + c.name, bg: c.hex, fg: textOn(c.hex), record: prev, color: c, until, instr: 'Inspect before ' + fmtDate(until, false), todo };
     }
   }
-  return { code: 'NOT_INSPECTED', title: 'NOT INSPECTED', sub: 'DO NOT USE', bg: '#d32f2f', fg: '#fff', stripes: true, instr: 'Inspect before use.' };
+  return { code: 'NOT_INSPECTED', title: 'NOT INSPECTED', sub: 'DO NOT USE', bg: '#d32f2f', fg: '#fff', stripes: true, instr: 'Inspect before use.', todo };
 }
 function lookup(id) {
   if (S.items[id]) return { kind: 'item', item: S.items[id] };
@@ -207,13 +232,14 @@ function lookup(id) {
 }
 function progress(d) {
   d = d || now();
-  const out = { active: 0, inspected: 0, rejected: 0, grace: 0, notInspected: 0 };
+  const cq = campaignQuarter(d);
+  const out = { active: 0, inspected: 0, rejected: 0, grace: 0, notInspected: 0, quarter: cq, early: !!earlyWindow(d) };
   for (const it of activeItems()) {
     out.active++;
-    const st = evaluate(it, d);
-    if (st.code === 'VALID' || st.code === 'REJECTED') out.inspected++;
-    if (st.code === 'REJECTED') out.rejected++;
-    if (st.code === 'GRACE') out.grace++;
+    const rec = latestIn(it.id, cq.key);
+    if (rec) out.inspected++;
+    if (rec && rec.result === 'Fail') out.rejected++;
+    if (evaluate(it, d).code === 'GRACE') out.grace++;
   }
   out.notInspected = out.active - out.inspected;
   return out;
@@ -232,7 +258,7 @@ function updateItem(id, patch) {
   return persist();
 }
 function recordInspection(id, result) {
-  const d = now(), qi = quarterInfo(d);
+  const d = now(), qi = campaignQuarter(d);
   const rec = { recId: S.nextRecId++, itemId: id, quarter: qi.key, date: d.toISOString(), result, inspector: S.settings.inspector || '', color: quarterColor(qi.q).name };
   S.inspections.push(rec);
   S.items[id].updatedAt = rec.date;
@@ -275,14 +301,16 @@ function badgeText(st) {
 /* --- Home --- */
 function viewHome() {
   const d = now(), qi = quarterInfo(d), c = quarterColor(qi.q), p = progress(d);
+  const nq = earlyWindow(d), nc = nq ? quarterColor(nq.q) : null;
   const last = S.settings.lastBackupAt ? toDate(S.settings.lastBackupAt) : null;
   const backupDue = p.active > 0 && (!last || (d - last) > BACKUP_REMIND_DAYS * 864e5);
   setApp(
     '<div class="screen">' +
     '<div class="banner" style="background:' + esc(c.hex) + ';color:' + textOn(c.hex) + '"><div class="q">' + qi.year + ' Q' + qi.q + '</div><div class="c">' + esc(c.name) + '</div></div>' +
+    (nq ? '<div class="notice" id="early-notice">' + nq.year + ' Q' + nq.q + ' ' + esc(nc.name) + ' inspection is open – apply ' + esc(nc.name) + ' tape from now</div>' : '') +
     '<a class="btn primary huge" href="#scan">SCAN</a>' +
     '<div class="card progress"><div class="big">' + p.inspected + ' / ' + p.active + ' inspected</div>' +
-    '<div class="muted">' + p.rejected + ' rejected · ' + p.notInspected + ' not inspected' + (p.grace ? ' · ' + p.grace + ' in grace' : '') + '</div></div>' +
+    '<div class="muted">' + (nq ? 'for ' + nq.year + ' Q' + nq.q + ' · ' : '') + p.rejected + ' rejected · ' + p.notInspected + ' not inspected' + (p.grace ? ' · ' + p.grace + ' in grace' : '') + '</div></div>' +
     (backupDue ? '<a class="notice" href="#export">Backup recommended – last backup: ' + (last ? fmtDate(last) : 'never') + '</a>' : '') +
     '<div class="nav"><a class="btn" href="#items">Items</a><a class="btn" href="#export">Export</a><a class="btn" href="#settings">Settings</a></div>' +
     '</div>'
@@ -378,7 +406,7 @@ function viewResult(id) {
   if (canInspect) $('#inspect-btn').onclick = () => startInspect(it);
 }
 function startInspect(it) {
-  const cur = latestIn(it.id, quarterInfo(now()).key);
+  const cur = latestIn(it.id, campaignQuarter(now()).key);
   if (cur && !confirm('Already inspected on ' + fmtDate(cur.date, false) + (cur.inspector ? ' by ' + cur.inspector : '') + ' (' + cur.result + ').\nRe-inspect?')) return;
   go('#inspect/' + it.id);
 }
@@ -447,11 +475,13 @@ function viewRegister(id) {
 function viewInspect(id) {
   const it = S.items[id];
   if (!it || it.status === 'Retired') return go('#result/' + id);
+  const cq = campaignQuarter(now());
   setApp(
     '<div class="screen">' +
     topbar('Inspect', '#result/' + esc(id), 'Cancel') +
     '<div class="card"><div class="id">' + esc(id) + '</div><div>' + esc(typeLabel(it)) + ' · ' + esc(teamLabel(it)) + '</div>' +
-    '<div class="muted">' + fmtDate(now()) + ' · Inspector: ' + esc(S.settings.inspector || '(not set – see Settings)') + '</div></div>' +
+    '<div class="muted">' + fmtDate(now()) + ' · Inspector: ' + esc(S.settings.inspector || '(not set – see Settings)') + '</div>' +
+    '<div class="muted" id="for-quarter">For ' + cq.year + ' Q' + cq.q + ' ' + esc(quarterColor(cq.q).name) + '</div></div>' +
     '<button class="btn green huge" id="pass" type="button">OK – PASS</button>' +
     '<button class="btn red huge" id="fail" type="button">FAIL</button>' +
     '</div>'
@@ -459,7 +489,7 @@ function viewInspect(id) {
   const done = async result => {
     $('#pass').disabled = true; $('#fail').disabled = true;
     await recordInspection(id, result);
-    const c = quarterColor(quarterInfo(now()).q);
+    const c = quarterColor(campaignQuarter(now()).q);
     flash = result === 'Pass' ? { text: 'Saved – apply ' + c.name + ' tape' } : { text: 'Saved – tag out & quarantine' };
     go('#result/' + id);
   };
@@ -489,7 +519,7 @@ function viewItems() {
 }
 function matchStatus(st, s) {
   if (s === 'ALL') return true;
-  if (s === 'TODO') return st.code === 'NOT_INSPECTED' || st.code === 'GRACE';
+  if (s === 'TODO') return !!st.todo;
   return st.code === s;
 }
 function renderItemsList() {
@@ -555,6 +585,7 @@ function viewItem(id) {
 function quarterKeys() {
   const set = new Set(S.inspections.map(r => r.quarter));
   set.add(quarterInfo(now()).key);
+  set.add(campaignQuarter(now()).key);
   return Array.from(set).sort().reverse();
 }
 function viewExport() {
@@ -693,6 +724,7 @@ function viewSettings() {
     '<form id="sform" class="card">' +
     '<div><label class="f" for="inspector">Inspector name (written on every inspection)</label><input id="inspector" type="text" value="' + esc(s.inspector) + '"></div>' +
     '<div><label class="f" for="grace">Grace days (previous quarter colour stays valid)</label><input id="grace" type="number" min="0" max="90" value="' + (s.graceDays | 0) + '"></div>' +
+    '<div><label class="f" for="early">Early start days (next quarter inspection opens this many days before it begins, 0 = off)</label><input id="early" type="number" min="0" max="60" value="' + (s.earlyDays | 0) + '"></div>' +
     '<h2>Quarter colours</h2>' +
     ['Q1', 'Q2', 'Q3', 'Q4'].map(q => '<div class="row qc"><span class="qn">' + q + '</span><input type="text" id="' + q + '-name" value="' + esc(s.quarterColors[q].name) + '" placeholder="Colour name"><input type="color" id="' + q + '-hex" value="' + esc(s.quarterColors[q].hex) + '"></div>').join('') +
     '<div><label class="f" for="types">Equipment types – one per line (“Other” is always offered)</label><textarea id="types">' + esc(s.types.join('\n')) + '</textarea></div>' +
@@ -712,6 +744,7 @@ function viewSettings() {
     if (!teams.length) return toast('At least one team is needed');
     s.inspector = $('#inspector').value.trim();
     s.graceDays = Math.max(0, Math.min(90, parseInt($('#grace').value, 10) || 0));
+    s.earlyDays = Math.max(0, Math.min(60, parseInt($('#early').value, 10) || 0));
     for (const q of ['Q1', 'Q2', 'Q3', 'Q4']) s.quarterColors[q] = { name: ($('#' + q + '-name').value.trim() || q).toUpperCase(), hex: $('#' + q + '-hex').value };
     s.types = types; s.teams = teams;
     await persist();
@@ -856,7 +889,7 @@ async function init() {
   render();
   registerSW();
 }
-window.CCI = { version: APP_VERSION, state: () => S, evaluate, quarterInfo, now, normalizeId, parseQr, persist };
+window.CCI = { version: APP_VERSION, state: () => S, evaluate, quarterInfo, campaignQuarter, earlyWindow, now, normalizeId, parseQr, persist };
 init();
 
 })();
